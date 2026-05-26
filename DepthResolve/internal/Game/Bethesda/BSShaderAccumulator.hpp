@@ -47,7 +47,7 @@ public:
 	};
 
 	uint32_t								unk034;
-	bool									bSetupWaterRefractionDepth;
+	bool									bWorldGeometry;
 	bool									unk039;
 	bool									bRenderDOF;
 	uint32_t								uiSunPixelCount;

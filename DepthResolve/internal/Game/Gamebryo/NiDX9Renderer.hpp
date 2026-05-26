@@ -203,7 +203,7 @@ public:
 	virtual void					IsDepthBufferCompatible();
 	virtual NiRenderTargetGroup*	GetDefaultRenderTargetGroup() const;
 	virtual NiRenderTargetGroup*	GetCurrentRenderTargetGroup() const;
-	virtual NiRenderTargetGroup*	GetDefaultDepthStencilBuffer() const;
+	virtual NiDepthStencilBuffer*	GetDefaultDepthStencilBuffer() const;
 	virtual Ni2DBuffer*				GetDefaultBackBuffer() const;
 	virtual uint32_t				GetMaxBuffersPerRenderTargetGroup() const;
 	virtual bool					GetIndependentBufferBitDepths() const;

@@ -37,7 +37,7 @@ public:
 	static NiTexturePtr spINTZDepthTexture;
 
 	static NiTexture* GetINTZDepthTexture(uint32_t auiWidth, uint32_t auiHeight) {
-		if (!spINTZDepthTexture) {
+		if (!spINTZDepthTexture) [[unlikely]] {
 			IDirect3DDevice9* pDevice = NiDX9Renderer::GetSingleton()->GetD3DDevice();
 			IDirect3DTexture9* pD3DTexture = nullptr;
 			pDevice->CreateTexture(auiWidth, auiHeight, 1, D3DUSAGE_DEPTHSTENCIL, (D3DFORMAT)MAKEFOURCC('I', 'N', 'T', 'Z'), D3DPOOL_DEFAULT, &pD3DTexture, nullptr);
@@ -63,31 +63,38 @@ public:
 	}
 };
 
+CallDetour kSortAlphaDetours[2];
+CallDetour kRenderGeometryGroupDetour;
 class BSShaderAccumulatorEx {
 private:
 	static IDirect3DSurface9* pLastRTDepth;
 public:
-	static void ResolveDepth(BSShaderAccumulator* apAccumulator, BSRenderedTexture* apCurrentRenderTarget) {
+	static void __fastcall ResolveDepth(BSRenderedTexture* apCurrentRenderTarget) {
+		IDirect3DDevice9* pDevice = NiDX9Renderer::GetSingleton()->GetD3DDevice();
 		if (bNVAPI) {
-			IDirect3DDevice9* pDevice = NiDX9Renderer::GetSingleton()->GetD3DDevice();
-			NiRenderTargetGroup* pRTGroup = apCurrentRenderTarget->GetRenderTargetGroup();
-			IDirect3DSurface9* pRTDepth = pRTGroup->GetDepthStencilBuffer()->GetDX9RendererData()->m_pkD3DSurface;
+			NiRenderTargetGroup* pRTGroup;
+			if (apCurrentRenderTarget)
+				pRTGroup = apCurrentRenderTarget->GetRenderTargetGroup();
+			else
+				pRTGroup = NiDX9Renderer::GetSingleton()->GetCurrentRenderTargetGroup();
 
-			if (pLastRTDepth && pRTDepth != pLastRTDepth) {
-				NvAPI_D3D9_UnregisterResource(pLastRTDepth);
-			}
-			pLastRTDepth = pRTDepth;
+			if (pRTGroup) [[likely]] {
+				IDirect3DSurface9* pRTDepth = pRTGroup->GetDepthStencilBuffer()->GetDX9RendererData()->m_pkD3DSurface;
 
-			IDirect3DBaseTexture9* pDepthBuffer = BSShaderManagerEx::GetINTZDepthTexture(0, 0)->GetDX9RendererData()->GetD3DTexture();
-			if (NvAPI_D3D9_StretchRectEx(pDevice, pRTDepth, NULL, pDepthBuffer, NULL, D3DTEXF_NONE) == NVAPI_UNREGISTERED_RESOURCE) {
-				NvAPI_D3D9_RegisterResource(pRTDepth);
-				NvAPI_D3D9_RegisterResource(pDepthBuffer);
-				NvAPI_D3D9_StretchRectEx(pDevice, pRTDepth, NULL, pDepthBuffer, NULL, D3DTEXF_NONE);
+				if (pLastRTDepth && pRTDepth != pLastRTDepth) {
+					NvAPI_D3D9_UnregisterResource(pLastRTDepth);
+				}
+				pLastRTDepth = pRTDepth;
+
+				IDirect3DBaseTexture9* pDepthBuffer = BSShaderManagerEx::GetINTZDepthTexture(0, 0)->GetDX9RendererData()->GetD3DTexture();
+				if (NvAPI_D3D9_StretchRectEx(pDevice, pRTDepth, NULL, pDepthBuffer, NULL, D3DTEXF_NONE) == NVAPI_UNREGISTERED_RESOURCE) {
+					NvAPI_D3D9_RegisterResource(pRTDepth);
+					NvAPI_D3D9_RegisterResource(pDepthBuffer);
+					NvAPI_D3D9_StretchRectEx(pDevice, pRTDepth, NULL, pDepthBuffer, NULL, D3DTEXF_NONE);
+				}
 			}
 		}
 		else if (bRESZ) {
-			IDirect3DDevice9* pDevice = NiDX9Renderer::GetSingleton()->GetD3DDevice();
-
 			pDevice->SetTexture(0, BSShaderManagerEx::GetINTZDepthTexture(0, 0)->GetDX9RendererData()->GetD3DTexture());
 
 			BSRenderState::SetZEnable(D3DZB_FALSE, BSRSL_NONE);
@@ -109,65 +116,48 @@ public:
 		}
 	}
 
-	static void FinishAccumulating_Standard_PostResolveDepth(BSShaderAccumulator* apAccumulator) {
-		NiDX9Renderer* pRenderer = NiDX9Renderer::GetSingleton();
-
-		BSRenderedTexture* pISTexture = BSShaderManager::GetCurrentRenderTarget();
-
-		// Pre-water depth.
-		if (apAccumulator->bSetupWaterRefractionDepth && pISTexture) {
-			ResolveDepth(apAccumulator, pISTexture);
-
-			if (!kPostDepthEffects.empty()) {
-				BSRenderedTexture::StopOffscreen();
-				for (const auto& pEffect : kPostDepthEffects) {
-					if (!pEffect)
-						continue;
-					if (!pEffect->IsActive())
-						continue;
-					ImageSpaceManager::GetSingleton()->RenderEffect(pEffect, pRenderer, pISTexture, pISTexture, 0, 1);
-				}
-				BSRenderedTexture::StartOffscreen(NiRenderer::CLEAR_NONE, pISTexture->GetRenderTargetGroup());
-				pRenderer->SetCameraData(apAccumulator->m_pkCamera);
+	static void __fastcall RenderImageSpaceEffects(BSShaderAccumulator* apAccumulator, BSRenderedTexture* apTexture) {
+		if (!kPostDepthEffects.empty()) {
+			NiDX9Renderer* pRenderer = NiDX9Renderer::GetSingleton();
+			BSRenderedTexture::StopOffscreen();
+			for (const auto& pEffect : kPostDepthEffects) {
+				if (!pEffect)
+					continue;
+				if (!pEffect->IsActive())
+					continue;
+				ImageSpaceManager::GetSingleton()->RenderEffect(pEffect, pRenderer, apTexture, apTexture, nullptr, true);
 			}
-		}
 
-		apAccumulator->RenderAlphaGeometry(static_cast<BSBatchRenderer::AlphaGroupType>(!apAccumulator->bIsUnderwater));
-
-		if (apAccumulator->bSetupWaterRefractionDepth && apAccumulator->GetWaterPassesWithinRange(BSShaderManager::BSSM_WATER_STENCIL, BSShaderManager::BSSM_WATER_SPECULAR_LIGHTING_Vc)) {
-			if (pISTexture) [[likely]] {
-				BSRenderedTexture::StopOffscreen();
-				if (!BSShaderManager::pWaterRefractionTexture) [[unlikely]]
-					BSShaderManager::pWaterRefractionTexture = BSShaderManager::GetTextureManager()->BorrowRenderedTexture(pRenderer, BSTextureManager::BSTM_RT_MAIN_FIRSTPERSON);
-
-				ImageSpaceManager::GetSingleton()->RenderEffect(ImageSpaceManager::IS_SHADER_COPY, pRenderer, pISTexture, BSShaderManager::pWaterRefractionTexture, 0, 1);
-				BSRenderedTexture::StartOffscreen(NiRenderer::CLEAR_NONE, pISTexture->GetRenderTargetGroup());
-			}
+			BSRenderedTexture::StartOffscreen(NiRenderer::CLEAR_NONE, apTexture->GetRenderTargetGroup());
 			pRenderer->SetCameraData(apAccumulator->m_pkCamera);
 		}
+	}
 
-		apAccumulator->RenderBatches(BSShaderManager::BSSM_WATER_STENCIL, BSShaderManager::BSSM_WATER_STENCIL_Vc);
-		apAccumulator->RenderBatches(BSShaderManager::BSSM_WATER_WADING, BSShaderManager::BSSM_WATER_WADING_SPECULAR_LIGHTING_Vc);
-		apAccumulator->RenderBatches(BSShaderManager::BSSM_WATER, BSShaderManager::BSSM_WATER_SPECULAR_LIGHTING_Vc);
+	void SetupDepth(NiCamera* apWorldCamera, NiCamera* ap1stPersonCamera, BSRenderedTexture* apRenderedTexture) {
+		ResolveDepth(apRenderedTexture);
+	}
 
-		// Post-water depth.
-		if (apAccumulator->bSetupWaterRefractionDepth && pISTexture) {
-			ResolveDepth(apAccumulator, pISTexture);
+	// Pre-water alpha
+	template<uint32_t auiIndex>
+	void SortAlphaPasses() {
+		ResolveDepth(nullptr);
+
+		if constexpr (auiIndex == 0) {
+			BSShaderAccumulator* pThis = reinterpret_cast<BSShaderAccumulator*>(this);
+			BSRenderedTexture* pISTexture = BSShaderManager::GetCurrentRenderTarget();
+			// Pre-water depth.
+			if (pThis->bWorldGeometry && pISTexture)
+				RenderImageSpaceEffects(pThis, pISTexture);
 		}
 
-		if (apAccumulator->bSetupWaterRefractionDepth) {
-			BSShaderManager::GetTextureManager()->ReturnRenderedTexture(BSShaderManager::pWaterRefractionTexture);
-			BSShaderManager::pWaterRefractionTexture = nullptr;
-		}
-		apAccumulator->RenderGeometryGroup(BSBatchRenderer::GROUP_UNK_9, true);
-		apAccumulator->RenderAlphaGeometry(static_cast<BSBatchRenderer::AlphaGroupType>(apAccumulator->bIsUnderwater));
+		ThisCall(kSortAlphaDetours[auiIndex].GetOverwrittenAddr(), this);
+	}
 
-		BSRenderState::SetAlphaBlendEnable(false, BSRSL_NONE);
-		BSRenderState::SetAlphaBlendEnable(false, BSRSL_NONE);
+	// Post-water alpha
+	void RenderGeometryGroup(BSBatchRenderer::GroupType auiGeometryGroup, bool abAlphaPass) {
+		ResolveDepth(nullptr);
 
-		apAccumulator->RenderBatches(BSShaderManager::BSSM_PRECIPITATION_RAIN, BSShaderManager::BSSM_SELFILLUMALPHA_S);
-
-		apAccumulator->RenderGeometryGroup(BSBatchRenderer::GROUP_UNK_1, false);
+		ThisCall(kRenderGeometryGroupDetour.GetOverwrittenAddr(), this, auiGeometryGroup, abAlphaPass);
 	}
 };
 
@@ -187,8 +177,6 @@ public:
 	bool UpdateParamsEx(int a2) {
 		bool bResult = ThisCall<bool>(0xBD66C0, this, a2);
 
-		NiDX9Renderer* pRenderer = NiDX9Renderer::GetSingleton();
-		IDirect3DDevice9* pDevice = pRenderer->GetD3DDevice();
 		SceneGraph* pSceneGraph = TESMain::GetWorldSceneGraph();
 		NiCamera* pSceneGraphCamera = pSceneGraph->GetCamera();
 
@@ -289,6 +277,9 @@ bool INTZTextureResetCallback(bool abBeforeReset, void* pvData) {
 NiTexturePtr BSShaderManagerEx::spINTZDepthTexture = nullptr;
 
 void InitHooks() {
+	// To allow manual resolve if someone needs one
+	WriteRelJumpEx(0xB65550, &BSShaderAccumulatorEx::SetupDepth);
+	
 	WriteRelJumpEx(0x875E40, &TESMainEx::RenderDepthOfField);
 	WriteRelJump(0xB54090, &ImageSpaceManagerEx::GetDepthTexture);
 
@@ -296,17 +287,16 @@ void InitHooks() {
 	// Skip accumulating geometry to depth groups, as we don't render them anymore
 	SafeWrite8(0xB64057, 0xEB);
 
-	// BSShaderAccumulator::FinishAccumulating_Standard_PreResolveDepth
-	// Skip alpha blend rendering.
-	SafeWriteBuf(0xB65C43, "\x90\x90\x90\x90\x90\x90\x90", 7);
-	SafeWriteBuf(0xB65C4C, "\x90\x90\x90\x90\x90\x90\x90", 7);
-	ReplaceCall(0xB6657D, &BSShaderAccumulatorEx::FinishAccumulating_Standard_PostResolveDepth);
-	ReplaceCall(0xB665AC, &BSShaderAccumulatorEx::FinishAccumulating_Standard_PostResolveDepth);
+	// World
+	kSortAlphaDetours[0].ReplaceCallEx(0xB65C32, &BSShaderAccumulatorEx::SortAlphaPasses<0>); // Pre-Water
+	kRenderGeometryGroupDetour.ReplaceCallEx(0xB65D62, &BSShaderAccumulatorEx::RenderGeometryGroup); // Post-Water
+
+	// First person
+	kSortAlphaDetours[1].ReplaceCallEx(0xB65E1F, &BSShaderAccumulatorEx::SortAlphaPasses<1>);
 
 	// TESMain::DrawWorldStandard
 	// Skip the not working motion blur while aiming rendering.
-	SafeWrite8(0x870EB3, 0xEB);  // JMP 
-	SafeWrite8(0x870EB4, 0x33);  // to 0x870EE8
+	SafeWrite16(0x870EB3, 0x33EB);  // JMP 0x870EE8
 
 	ReplaceVirtualFuncEx(0x10BC42C, &ImageSpaceEffectDepthOfFieldEx::UpdateParamsEx);
 	ReplaceVirtualFuncEx(0x10BC424, &ImageSpaceEffectDepthOfFieldEx::ReturnTexturesEx);
