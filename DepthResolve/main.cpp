@@ -95,6 +95,9 @@ public:
 			}
 		}
 		else if (bRESZ) {
+			IDirect3DBaseTexture9* pOrigTexture;
+			pDevice->GetTexture(0, &pOrigTexture);
+
 			pDevice->SetTexture(0, BSShaderManagerEx::GetINTZDepthTexture(0, 0)->GetDX9RendererData()->GetD3DTexture());
 
 			BSRenderState::SetZEnable(D3DZB_FALSE, BSRSL_NONE);
@@ -113,6 +116,11 @@ public:
 
 			pDevice->SetRenderState(D3DRS_POINTSIZE, 0x7FA05000);
 			pDevice->SetRenderState(D3DRS_POINTSIZE, uiOrigPointSize);
+
+			pDevice->SetTexture(0, pOrigTexture);
+			
+			if (pOrigTexture)
+				pOrigTexture->Release();
 		}
 	}
 
